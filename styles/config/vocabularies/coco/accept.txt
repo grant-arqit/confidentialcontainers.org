@@ -227,3 +227,12 @@ CRL[s]
 HKD[s]
 subcommand
 CLI
+PQC[s]
+[Dd]ecapsulation
+[Jj]ose
+KEM[s]
+(?i)kbs
+ek
+interoperate
+unimpacted
+CSO[s]
