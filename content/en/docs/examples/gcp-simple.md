@@ -183,7 +183,7 @@ gcloud compute firewall-rules create allow-port-15150-restricted \
 {{% tab header="Last Release" %}}
 
 ```bash
-export CAA_VERSION="0.17.0"
+export CAA_VERSION="0.22.0"
 curl -LO "https://github.com/confidential-containers/cloud-api-adaptor/archive/refs/tags/v${CAA_VERSION}.tar.gz"
 tar -xvzf "v${CAA_VERSION}.tar.gz"
 cd "cloud-api-adaptor-${CAA_VERSION}/src/cloud-api-adaptor/install/charts/peerpods"
