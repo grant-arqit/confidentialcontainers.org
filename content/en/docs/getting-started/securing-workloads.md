@@ -47,7 +47,7 @@ metadata:
 spec:
   runtimeClassName: kata-qemu-tdx
   containers:
-  - image: bitnami/nginx:1.22.0
+  - image: bitnami/nginx:latest
     name: nginx
 ```
 

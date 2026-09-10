@@ -39,7 +39,7 @@ metadata:
     io.katacontainers.config.hypervisor.kernel_params: "agent.aa_kbc_params=cc_kbc::http://<kbs-ip>:<kbs-port>"
 spec:
   containers:
-  - image: bitnami/nginx:1.22.0
+  - image: bitnami/nginx:latest
     name: nginx
   dnsPolicy: ClusterFirst
   runtimeClassName: kata-qemu-coco-dev
