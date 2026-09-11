@@ -10,12 +10,14 @@ tags:
   - gke
 ---
 
-This documentation will walk you through setting up CAA (a.k.a. Peer Pods) on
-Google Kubernetes Engine (GKE). It explains how to deploy:
+This documentation will walk you through setting up Cloud API Adaptor (CAA) (a.k.a. Peer Pods) on 
+Google Kubernetes Engine (GKE). 
 
-- A single worker node Kubernetes cluster using GKE
-- CAA on that Kubernetes cluster
-- A sample application backed by a CAA pod VM
+It explains how to deploy:
+
+- A single worker node Kubernetes cluster using Google Kubernetes Engine (GKE),
+- CAA on that Kubernetes cluster,
+- A sample application deployed using CAA to verify that everything is working as expected.
 
 ## Pre-requisites
 
@@ -32,65 +34,83 @@ Google Cloud Project:
 
 ## GCP Preparation
 
-Start by authenticating with Google and choosing your project:
+1. Set the environment variable `GCP_PROJECT_ID` to your Google Cloud project ID:
 
-```bash
-export GCP_PROJECT_ID="YOUR_PROJECT_ID"
-gcloud auth login
-gcloud config set project ${GCP_PROJECT_ID}
-```
+    ```bash
+    export GCP_PROJECT_ID="YOUR_PROJECT_ID"
+    ```
 
-Enable the necessary API:
+2. Authenticate with Google Cloud and set the project:
 
-```bash
-gcloud services enable container.googleapis.com --project=${GCP_PROJECT_ID}
-```
+    ```bash
+    gcloud auth login
+    gcloud config set project "${GCP_PROJECT_ID}"
+    ```
 
-Create a service account with the necessary permissions:
+3. Enable the GKE, Compute Engine, and IAM APIs:
 
-```bash
-gcloud iam service-accounts create peerpods \
-  --description="Peerpods Service Account" \
-  --display-name="Peerpods Service Account"
+    ```bash
+    gcloud services enable container.googleapis.com compute.googleapis.com iam.googleapis.com \
+      --project="${GCP_PROJECT_ID}"
+    ```
 
-gcloud projects add-iam-policy-binding ${GCP_PROJECT_ID} \
-  --member="serviceAccount:peerpods@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
-  --role="roles/compute.instanceAdmin.v1"
+   These APIs are required to:
 
-gcloud projects add-iam-policy-binding ${GCP_PROJECT_ID} \
-  --member="serviceAccount:peerpods@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
-  --role="roles/iam.serviceAccountUser"
-```
+   - create and manage the GKE cluster,
+   - provision the confidential PodVM instances and related networking resources,
+   - create and authorize the service account that Cloud API Adaptor uses to access GCP.
 
-Generate and save the credentials file:
+4. Create a service account for peer pods and grant it the required permissions:
 
-```bash
-gcloud iam service-accounts keys create \
-  ~/.config/gcloud/peerpods_application_key.json \
-  --iam-account=peerpods@${GCP_PROJECT_ID}.iam.gserviceaccount.com
-```
+   ```bash
+   gcloud iam service-accounts create peerpods \
+     --description="Peerpods Service Account" \
+     --display-name="Peerpods Service Account"
+   
+   gcloud projects add-iam-policy-binding ${GCP_PROJECT_ID} \
+     --member="serviceAccount:peerpods@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
+     --role="roles/compute.instanceAdmin.v1"
+   
+   gcloud projects add-iam-policy-binding ${GCP_PROJECT_ID} \
+     --member="serviceAccount:peerpods@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
+     --role="roles/iam.serviceAccountUser"
+   ```
 
-```bash
-export GOOGLE_APPLICATION_CREDENTIALS=~/.config/gcloud/peerpods_application_key.json
-```
+   These roles allow the Cloud API Adaptor to:
 
-Configure additional environment variables that will be used later.
+   - create, start/stop, and delete the Compute Engine instances used as **PodVMs** (`roles/compute.instanceAdmin.v1`),
+   - run actions as the `peerpods` service account when provisioning those resources (service-account impersonation via `roles/iam.serviceAccountUser`).
 
-Set the region:
+   > **Note**: IAM policy updates can take a few minutes to propagate. If later steps fail with permission errors, wait briefly and retry.
 
-```bash
-export GCP_REGION="us-central1"
-```
+5. Set the `GOOGLE_APP_CREDENTIALS` environment variable to point to the credentials file that will be generated in the next step:
 
-{{% alert title="Note" color="primary" %}}
-"us-central1" was chosen because supports Confidential VMs. For a
-complete list of supported regions visit
-https://cloud.google.com/confidential-computing/confidential-vm/docs/supported-configurations#supported-zones
-{{% /alert %}}
+    ```bash
+    export GOOGLE_APP_CREDENTIALS=~/.config/gcloud/peerpods_application_key.json
+    ```
 
-Set the PodVM instance type:
+6. Generate and save the credentials file:
 
-{{< tabpane text=true right=true persist=header >}}
+    ```bash
+    gcloud iam service-accounts keys create \
+      "${GOOGLE_APP_CREDENTIALS}" \
+      --iam-account="peerpods@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+    ```
+
+7. Set the `GCP_REGION` environment variable to the desired region for your GKE cluster with Intel® TDX supported instances:
+
+    ```bash
+    export GCP_REGION="us-central1"
+    ```
+
+    {{% alert title="Note" color="primary" %}}
+    "us-central1" was chosen because supports Confidential VMs.<br> 
+    For a complete list of supported regions visit [supported-configurations](https://cloud.google.com/confidential-computing/confidential-vm/docs/supported-configurations#supported-zones).
+    {{% /alert %}}
+
+8. Set TEE platform and PodVM instance type for your workload:
+
+   {{< tabpane text=true right=true persist=header >}}
 
 {{% tab header="AMD SEV-SNP" %}}
 ```bash
@@ -101,13 +121,18 @@ export GCP_DISK_TYPE="pd-standard"
 ```
 {{% /tab %}}
 
-{{% tab header="Intel TDX" %}}
+{{% tab header="Intel® TDX" %}}
 ```bash
 export PODVM_INSTANCE_TYPE="c3-standard-4"
 export DISABLECVM=false
 export GCP_CONFIDENTIAL_TYPE="TDX"
 export GCP_DISK_TYPE="pd-balanced"
 ```
+
+For the purposes of this example, we use a C3 machine type that supports Intel® TDX.
+
+> **Note**: Choose a C3 machine type that fits your workload from the list of supported options in the [Google Cloud C3 machine types documentation](https://docs.cloud.google.com/compute/docs/general-purpose-machines#c3_machine_types).
+
 {{% /tab %}}
 
 {{% tab header="Non-Confidential" %}}
@@ -126,24 +151,48 @@ export GCP_DISK_TYPE="pd-standard"
 Deploy a single node Kubernetes cluster using GKE:
 
 ```bash
-gcloud container clusters create my-cluster \
+export GKE_CLUSTER_NAME="caa-gke"
+
+gcloud container clusters create "${GKE_CLUSTER_NAME}" \
   --zone ${GCP_REGION}-a \
   --machine-type "e2-standard-4" \
   --image-type UBUNTU_CONTAINERD \
   --num-nodes 1
 ```
 
-Label the worker nodes:
+> **Note**: The `e2-standard-4` machine type is used for the GKE cluster nodes, which is a general-purpose machine.<br>
+The `UBUNTU_CONTAINERD` image type is specified to ensure compatibility with the container runtime used by CAA.
+
+Get cluster credentials:
 
 ```bash
-kubectl get nodes --selector='!node-role.kubernetes.io/master' -o name | \
-xargs -I{} kubectl label {} node.kubernetes.io/worker=
+gcloud container clusters get-credentials "${GKE_CLUSTER_NAME}" \
+  --zone "${GCP_REGION}-a" \
+  --project "${GCP_PROJECT_ID}"
 ```
 
+**(Optional)** Verify that the cluster is reachable:
+
+```bash
+kubectl get nodes -o wide
+```
+
+Label the worker node:
+
+```bash
+kubectl get nodes \
+  --selector='!node-role.kubernetes.io/master' \
+  -o name \
+  | xargs -I{} kubectl label {} node.kubernetes.io/worker=
+```
+
+This labeling step adds the `node.kubernetes.io/worker` label to non-control-plane nodes.
+
 {{% alert title="Note" color="primary" %}}
-Starting with GKE version 1.27, GCP configures containerd with the `discard_unpacked_layers=true` flag to optimize disk 
-usage by removing compressed image layers after they are unpacked. However, this can cause issues with PeerPods, 
-as the workload may fail to locate required layers. 
+Starting with GKE version 1.27, GCP configures containerd with the `discard_unpacked_layers=true` flag to optimize disk
+usage by removing compressed image layers after they are unpacked. However, this can cause issues with PeerPods,
+as the workload may fail to locate required layers.
+
 To avoid this, disable the `discard_unpacked_layers` setting in the containerd configuration.
 
 If you encounter problem with VM's not running check [Troubleshooting](#troubleshooting) section on this page.
@@ -172,6 +221,202 @@ gcloud compute firewall-rules create allow-port-15150-restricted \
    --allow=tcp:15150 \
    --source-ranges=[YOUR_EXTERNAL_IP]
 ```
+
+## Build and publish the PodVM image
+
+### Pre-requisites
+
+This section describes the prerequisites that we assume for the following steps regarding installed software and access to Google Cloud.
+
+Install Required Tools:
+
+- Install [Docker](https://docs.docker.com/engine/install/) with `buildx`
+- Install packages:
+   - `make`
+   - `qemu-utils`
+   - `git`
+- Install `yq`:
+  ```bash
+  ARCH=amd64
+  sudo curl -fsSL -o /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}"
+  sudo chmod +x /usr/local/bin/yq
+  ```
+- Install `gcloud` CLI [tool](https://cloud.google.com/sdk/docs/install)
+
+Clone repository: [Cloud API Adaptor repository](https://github.com/confidential-containers/cloud-api-adaptor.git).
+
+This repository contains the necessary scripts and configurations to build the PodVM image.
+
+### Build the PodVM image
+
+1. Navigate to the `cloud-api-adaptor/src/cloud-api-adaptor/podvm` directory.
+
+2. Build the **binaries** using below command:
+
+   ```bash
+   ARCH=amd64 TEE_PLATFORM=tdx \
+     make podvm-binaries
+   ```
+
+   The `ARCH` parameter can be:
+   - `amd64` / `x86_64`: 64-bit x86 systems using Intel® or AMD processors
+   - `arm64` / `aarch64`: 64-bit Arm systems
+   - `s390x`: 64-bit IBM systems
+   - `ppc64le`: 64-bit IBM Power systems
+
+   The `TEE_PLATFORM` parameter can be:
+   - `none`: for tests with non-confidential guests
+   - `all`: for all following platforms
+   - `fs`: for platforms with encrypted root filesystems (i.e. s390x)
+   - `tdx`: for Intel® TDX
+   - `az-tdx-vtpm`: for Intel® TDX with Azure vTPM
+   - `snp`/`amd`: for AMD SEV-SNP
+   - `az-snp-vtpm`: for AMD SEV-SNP with Azure vTPM
+   - `se`: for IBM Secure Execution (SE)
+
+3. Build the **image**:
+
+{{< tabpane text=true right=true persist=header >}}
+{{% tab header="**Build types**:" disabled=true /%}}
+
+{{% tab header="Release" %}}
+
+Run below command to build the release image:
+
+```bash
+make image
+```
+
+> **Note**: This will only build the pod VM image **without** SSH access.
+
+{{% /tab %}}
+
+{{% tab header="Debug" %}}
+
+1. Prepare SSH key to build debug image
+
+   For using SSH, create a file `resources/authorized_keys` with your SSH public key.
+   Ensure the permissions are set to `0400` for the `authorized_keys` file.
+   SSH access is only possible for the `root` user.
+
+   Below are the commands to generate a new SSH key and create the `authorized_keys` file:
+
+   1. Create SSH key pair and copy public keys to proper location:
+
+      ```bash
+      ssh-keygen -t rsa -f ./gcp_ssh_debug -C gcp_ssh_debug
+      cp ./gcp_ssh_debug.pub resources/authorized_keys
+      chmod 400 resources/authorized_keys
+      ```
+
+   2. Add credentials to google using CLI
+
+       ```bash
+       gcloud compute os-login ssh-keys add \
+       --key-file=$(realpath ./gcp_ssh_debug.pub) \
+       --project=${GCP_PROJECT_ID} \
+       --ttl=0
+       ```
+
+      > **Note**: TTL (time to live) is set to 0, which means that the key will not expire. 
+      > You can set it to any value you want, for example `1h` for 1 hour or `30m` for 30 minutes.
+
+2. Run command to build debug image
+    
+   ```bash
+   make image-debug
+   ```
+
+   > **Note**: This will only build the pod VM image **with** SSH access.
+
+{{% /tab %}}
+
+{{< /tabpane >}} 
+
+Above commands will produce `./build/system.raw` (~1.6GB), a disk image that can be booted with an ESP/UEFI partition.
+
+### Publish image to Google Storage
+
+1. Prepare the raw disk image and package it as `build/disk.tar.gz`:
+
+   ```bash
+   cp build/system.raw build/disk.raw && \
+     tar -cvzf build/disk.tar.gz -C build disk.raw
+   ```
+
+2. Export the following environment variables:
+
+   ```bash
+   export GCP_PROJECT_ID="YOUR_PROJECT_ID"
+   export GCP_REGION="us-central1"
+   export BUCKET_NAME="peerpods-bucket"
+   ```
+
+   > **Note**: Above values should be set according to your Google Cloud project and region set in previous steps.<br>
+   > The `BUCKET_NAME` should be globally unique across all of Google Cloud, so consider adding a random suffix if needed.
+
+3. Login to Google account and follow instructions in command line to authenticate:
+
+    ```bash
+    gcloud init
+    ```
+
+4. Create a GCS bucket for images:
+
+   ```bash
+   gcloud storage buckets create "gs://${BUCKET_NAME}" \
+     --project="${GCP_PROJECT_ID}" \
+     --location="${GCP_REGION}"
+   ```
+
+5. Upload the disk image to a bucket and create the image:
+
+   1. Prepare image name:
+
+      ```bash
+      export IMAGE_BASE_NAME="podvm-image"
+      export CAA_HASH=$(git rev-parse --short HEAD)
+      export IMAGE_NAME="${IMAGE_BASE_NAME}-${CAA_HASH}-release"
+      ```
+
+      > **Note**: For consistency, the git commit hash is part of image name and release type (debug/release) to differentiate between development and production builds.
+
+   2. Upload image to GCS bucket:
+      ```bash
+      gcloud storage cp build/disk.tar.gz gs://${BUCKET_NAME}/peerpods-disk.tar.gz
+      ```
+
+   3. Create image in GCP with defined name from the uploaded disk image:
+
+      {{< tabpane text=true right=true persist=header >}}
+      
+   {{% tab header="AMD SEV-SNP" %}}
+   ```bash
+   gcloud compute images create ${IMAGE_NAME} \
+     --source-uri=gs://${BUCKET_NAME}/peerpods-disk.tar.gz \
+     --guest-os-features=UEFI_COMPATIBLE
+   ```
+
+   This command creates a new image in GCP with the specified name and the uploaded disk image.<br>
+   The `--guest-os-features` flag ensures that the image is compatible with UEFI.
+   {{% /tab %}}
+      
+   {{% tab header="Intel® TDX" %}}
+
+   ```bash
+   gcloud compute images create ${IMAGE_NAME} \
+     --source-uri=gs://${BUCKET_NAME}/peerpods-disk.tar.gz \
+     --guest-os-features=UEFI_COMPATIBLE,TDX_CAPABLE
+   ```
+
+   **Both** `UEFI_COMPATIBLE` and `TDX_CAPABLE` are required for `tdx` TEE.
+
+   This command creates a new image in GCP with the specified name and the uploaded disk image.<br>
+   The `--guest-os-features` flag ensures that the image is compatible with UEFI and TDX.
+
+   {{% /tab %}}
+       
+   {{< /tabpane >}}
 
 ## Deploy the CAA Helm chart
 
@@ -203,55 +448,37 @@ cd "cloud-api-adaptor-${CAA_BRANCH}/src/cloud-api-adaptor/install/charts/peerpod
 {{% /tab %}}
 
 {{% tab header="DIY" %}}
-This assumes that you already have the code ready to use. 
+This assumes that you already have the code ready to use.
 On your terminal change directory to the Cloud API Adaptor's code base.
 {{% /tab %}}
 
 {{< /tabpane >}}
 
-### Export PodVM image version
+### Export PodVM image id
 
-Exports the PodVM image ID used by peer pods. This variable tells the deployment tooling which PodVM image version
-to use when creating peer pod virtual machines in Google Cloud.
-
-The image is pulled from the Coco community gallery (or manually built) and must match the current CAA release version.
-
-{{< tabpane text=true right=true persist=header >}}
-{{% tab header="**Versions**:" disabled=true /%}}
-
-{{% tab header="Last Release" %}}
-
-Export this environment variable to use for the PodVM:
+Export the PodVM image id to be used in the provider configuration. This is the name of the image created in the previous step.
 
 ```bash
-export PODVM_IMAGE_ID="/projects/it-cloud-gcp-prod-osc-devel/global/images/fedora-mkosi-tee-amd-1-11-0"
+export PODVM_IMAGE_ID="podvm-image-00754585-release"
 ```
 
-{{% /tab %}}
+<details>
+   <summary><strong>Show command how to retrieve latest published image from GCP</strong></summary>
 
-{{% tab header="Latest Build" %}}
+   Run below command to retrieve the latest published image from GCP:
 
-There are no pre-built PodVM image for latest builds. You'll need to follow
-[these
-instructions](https://github.com/confidential-containers/cloud-api-adaptor/tree/main/src/cloud-api-adaptor/gcp#build-pod-vm-image)
-to build the PodVM image. Once image build is finished then export image id to
-the environment variable `PODVM_IMAGE_ID`.
+   ```bash
+   gcloud compute images list \
+     --project="${GCP_PROJECT_ID}" \
+     --filter="name ~ ^${IMAGE_BASE_NAME}-" \
+     --sort-by=~creationTimestamp \
+     --limit=1 \
+     --format="value(name)"
+   ```
 
-{{% /tab %}}
+   </details>
 
-{{% tab header="DIY" %}}
-
-If you have made changes to the CAA code that affects the pod VM image and you
-want to deploy those changes then follow [these
-instructions](https://github.com/confidential-containers/cloud-api-adaptor/tree/main/src/cloud-api-adaptor/gcp#build-pod-vm-image)
-to build the PodVM image. Once image build is finished then export image id to
-the environment variable `PODVM_IMAGE_ID`.
-
-{{% /tab %}}
-
-{{< /tabpane >}}
-
-#### Export CAA container image path
+#### Set the CAA container image and tag
 
 Define the Cloud API Adaptor (CAA) container image to deploy.
 These variables tell the deployment tooling which CAA image and architecture-specific tag to pull and run.
@@ -273,22 +500,20 @@ export CAA_TAG="v${CAA_VERSION}-amd64"
 
 {{% tab header="Latest Build" %}}
 
-Export the following environment variable to use the image built by the CAA CI
-on each merge to main:
+Export the following environment variable to use the image built by the CAA CI on each merge to main:
 
 ```bash
 export CAA_IMAGE="quay.io/confidential-containers/cloud-api-adaptor"
 ```
 
-Find an appropriate tag of pre-built image suitable to your
-needs [here](https://quay.io/repository/confidential-containers/cloud-api-adaptor?tab=tags&tag=latest).
+Find an appropriate tag of pre-built image suitable to your needs [here](https://quay.io/repository/confidential-containers/cloud-api-adaptor?tab=tags&tag=latest).
 
 ```bash
 export CAA_TAG=""
 ```
 
-> **Caution**: You can also use the `latest` tag but it is **not** recommended,
-> because of its lack of version control and potential for unpredictable
+> **Caution**: You can also use the `latest` tag, but it is **not** recommended, 
+> because of its lack of version control and potential for unpredictable 
 > updates, impacting stability and reproducibility in deployments.
 
 {{% /tab %}}
@@ -305,7 +530,7 @@ variables `CAA_IMAGE` and `CAA_TAG`.
 
 {{< /tabpane >}}
 
-### Populate the `providers/gcp.yaml` file
+### Populate the provider file
 
 List of all available configuration options can be found in two places:
 - [Main charts values](https://github.com/confidential-containers/cloud-api-adaptor/blob/main/src/cloud-api-adaptor/install/charts/peerpods/values.yaml)
@@ -332,11 +557,11 @@ providerConfigs:
 EOF
 ```
 
-### Deploy helm chart on the Kubernetes cluster
+### Deploy helm chart
 
-1. Create namespace managed by Helm:
-    ```bash
-   kubectl apply -f - << EOF
+1. Create file `namespace.yaml` with the following content:
+
+   ```yaml
    apiVersion: v1
    kind: Namespace
    metadata:
@@ -346,20 +571,29 @@ EOF
      annotations:
        meta.helm.sh/release-name: peerpods
        meta.helm.sh/release-namespace: confidential-containers-system
-   EOF
-    ```
+   ```
 
-2. Create the secret using `kubectl`:
+   This namespace will be used to deploy CAA and related components, and it is labeled and annotated to be managed by Helm.
+
+2. Create namespace managed by Helm:
+
+   ```bash
+   kubectl apply -f namespace.yaml
+   ```
+
+3. Create a Kubernetes Secret that stores the GCP service-account credentials:
 
    See [providers/gcp-secrets.yaml.template](https://github.com/confidential-containers/cloud-api-adaptor/blob/main/src/cloud-api-adaptor/install/charts/peerpods/providers/gcp-secrets.yaml.template) for required keys.
 
-    ```bash
-    kubectl create secret generic my-provider-creds \
+   ```bash
+   kubectl create secret generic my-provider-creds \
      -n confidential-containers-system \
-     --from-file=GCP_CREDENTIALS="${GOOGLE_APPLICATION_CREDENTIALS}"
-    ```
+     --from-file=GCP_CREDENTIALS="${GOOGLE_APP_CREDENTIALS}"
+   ```
 
-3. Install helm chart:
+   The CAA Helm chart references this secret to authenticate to Google Cloud when provisioning PodVMs.
+
+4. Install helm chart:
 
    Below command uses customization options `-f` and `--set` which are described [here](../../getting-started/installation/advanced_configuration).
 
@@ -375,9 +609,7 @@ EOF
 Generic Peer pods Helm charts deployment instructions are also described 
 [here](https://github.com/confidential-containers/cloud-api-adaptor/tree/main/src/cloud-api-adaptor/install/charts/peerpods/README.md).
 
-## Run a sample application
-
-### Ensure runtimeclass is present
+### Verify deployment
 
 Verify that the `runtimeclass` is created after deploying Peer Pods Helm Charts:
 
@@ -394,7 +626,7 @@ NAME          HANDLER       AGE
 kata-remote   kata-remote   7m18s
 ```
 
-### Deploy workload
+## Run sample application
 
 {{< tabpane text=true right=true persist=header >}}
 
@@ -403,7 +635,7 @@ This example showcases a more advanced deployment using TEE and confidential
 VMs with the kata-remote runtime class. It demonstrates how to deploy a sample
 pod and retrieve a secret securely within a confidential computing environment.
 
-### Prepare the init data configuration
+##### Prepare the init data configuration
 
 Peerpods now supports init data, you can pass the required configuration files
 (`aa.toml`, `cdh.toml`, and `policy.rego`) via the
@@ -557,10 +789,10 @@ spec:
 EOF
 ```
 
-### Fetching Secrets from Trustee
+##### Fetching Secrets from Trustee
 
-Once the pod is successfully deployed with the `initdata`, you can retrieve secrets from the Trustee service running 
-inside the pod. Use the following command to fetch a specific secret:
+Once the pod is successfully deployed with the `initdata`, you can retrieve secrets from the Trustee service running inside the pod. 
+Use the following command to fetch a specific secret:
 
 ```bash
 kubectl exec -it example-pod -- curl http://127.0.0.1:8006/cdh/resource/default/kbsres1/key1
@@ -568,7 +800,7 @@ kubectl exec -it example-pod -- curl http://127.0.0.1:8006/cdh/resource/default/
 
 {{% tab header="Basic nginx" %}}
 
-This example demonstrates how to verify if Helm chart is successfully starting the PodVM within the cloud provider. 
+This example demonstrates how to verify if Helm chart is successfully starting the PodVM within the cloud provider.
 It is the simplest example available for deployment.
 
 Create an `nginx` deployment:
@@ -610,8 +842,7 @@ Ensure that the pod is up and running:
 kubectl get pods -n default
 ```
 
-You can verify that the PodVM was created by running the following
-command:
+You can verify that the PodVM was created by running the following command:
 
 ```bash
 gcloud compute instances list
@@ -619,29 +850,100 @@ gcloud compute instances list
 
 Here you should see the VM associated with the pod used by the example above.
 
-## Cleanup
+## Uninstall
 
-Delete all running pods using the runtimeclass `kata-remote`. You can use the
-following command for the same:
+To uninstall Confidential Containers from GKE cluster, use the following commands:
 
-```bash
-kubectl get pods -A -o custom-columns='NAME:.metadata.name,NAMESPACE:.metadata.namespace,RUNTIMECLASS:.spec.runtimeClassName' | grep kata-remote | awk '{print $1, $2}'
-```
+1. Remove all pods with `kata-runtime` runtime class:
 
-Verify that all peer-pod VMs are deleted. You can use the following command to
-list all the peer-pod VMs (VMs having prefix `podvm`) and status:
+    ```bash
+    kubectl get pods -A -o custom-columns='NAME:.metadata.name,NAMESPACE:.metadata.namespace,RUNTIMECLASS:.spec.runtimeClassName' \
+    | grep kata-remote \
+    | awk '{print $1, $2}' \
+    | xargs -n 2 sh -c 'kubectl delete pod -n "$2" "$1"' _
+    ```
 
-```bash
-gcloud compute instances list \
-  --filter="name~'podvm.*'" \
-  --format="table(name,zone,status)"
-```
+2. Verify that all peer pod VMs are deleted:
 
-Delete the GKE cluster by running the following command:
+   Use the following command to list all the peer pod VMs (VMs having prefix `podvm`) and status.
 
-```bash
-gcloud container clusters delete my-cluster --zone ${GCP_REGION}-a
-```
+   ```bash
+   gcloud compute instances list \
+     --filter="name~'podvm.*'" \
+     --format="table(name,zone,status)"
+   ```
+
+3. List deployed Confidential Containers Helm chart:
+
+   > **Note**: This command assumes that only one Helm release is deployed in the `confidential-containers-system` namespace. 
+   > If there are multiple releases, you may need to adjust the command to select the correct one.
+
+   ```bash
+   export HELM_COCO_CHART_NAME=$(helm list \
+                                  -n confidential-containers-system \
+                                  --short)
+   ```
+
+4. Delete Confidential Containers related Helm chart:
+
+   ```bash
+   helm uninstall ${HELM_COCO_CHART_NAME} \
+     --namespace confidential-containers-system
+   ```
+
+5. Delete secret with provider credentials `my-provider-creds`:
+
+   ```bash
+   kubectl delete secret my-provider-creds \
+     -n confidential-containers-system
+   ```
+
+6. Delete Confidential Containers related namespace:
+
+   ```bash
+   kubectl delete namespace confidential-containers-system
+   ```
+
+7. Delete the GKE cluster by running the following command and confirming the deletion when prompted:
+
+   ```bash
+   gcloud container clusters delete "${GKE_CLUSTER_NAME}" \
+     --zone "${GCP_REGION}-a"
+   ```
+
+## Debug SSH connection
+
+> **Note**: SSH connection is available **only** for debug image, which is built with enabled SSH server and added public key to `authorized_keys` file.
+> If you want to have SSH access to the image, make sure to build debug image and upload it to Google using above instructions.
+
+After creating debug image with enabled SSH, deploy CoCo with sample pod and use root account to access it:
+
+> **Note**: **Remember** to add your public key to Google using CLI
+
+1. Export environment variable `GCP_PODVM_IP` using below code:
+
+   ```bash
+   GCP_LATEST_PODVM=$(gcloud compute instances list \
+                               --project="${GCP_PROJECT_ID}" \
+                               --filter="name ~ ^podvm-" \
+                               --sort-by=~creationTimestamp \
+                               --limit=1 \
+                               --format="value(name)")
+   
+   export GCP_PODVM_IP=$(gcloud compute instances describe "${GCP_LATEST_PODVM}" \
+                           --project="${GCP_PROJECT_ID}" \
+                           --zone="$(gcloud compute instances list \
+                                       --project="${GCP_PROJECT_ID}" \
+                                       --filter="name=${GCP_LATEST_PODVM}" \
+                                       --format="value(zone)")" \
+                           --format="value(networkInterfaces[0].accessConfigs[0].natIP)")
+   ```
+
+2. Connect to debug image using SSH:
+
+   ```bash
+   ssh -i ./gcp_ssh_debug root@"$GCP_PODVM_IP"
+   ```
 
 ## Troubleshooting
 
@@ -662,6 +964,21 @@ Error: failed to create containerd container: error unpacking image: failed to e
 To disable the `discard_unpacked_layers` setting in the `containerd` configuration on **Google Kubernetes Engine (GKE) version 1.27 or later**, follow these steps:
 
 1. SSH to worker node [Google console](https://console.cloud.google.com/compute/instances)
-2. Run command `sudo sed -i 's/discard_unpacked_layers = true/discard_unpacked_layers = false/' /etc/containerd/config.toml`
-3. Verify changed property `sudo cat /etc/containerd/config.toml | grep discard_unpacked_layers`
-4. Restart containerd `sudo systemctl restart containerd`
+
+2. Run command which will change the `discard_unpacked_layers` property to `false` in the containerd configuration file:
+
+   ```bash
+   sudo sed -i 's/discard_unpacked_layers = true/discard_unpacked_layers = false/' /etc/containerd/config.toml
+   ```
+
+3. Verify changed property:
+
+    ```bash
+    sudo cat /etc/containerd/config.toml | grep discard_unpacked_layers
+    ```
+
+4. Restart containerd using below command:
+
+    ```bash
+    sudo systemctl restart containerd
+    ```
