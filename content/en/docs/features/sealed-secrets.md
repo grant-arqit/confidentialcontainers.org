@@ -78,12 +78,14 @@ while envelope secrets are wrapped secrets that are unwrapped with a KMS.
 
    </details>
 
-2. Use a helper CLI tool for sealed secrets which is available in the Guest Components repository.
+2. Use the secret CLI to create a sealed secret.
+   Pull a prebuilt `secret` binary with [ORAS](https://oras.land/) from the
+   [`secret-cli` GitHub package](https://github.com/confidential-containers/guest-components/pkgs/container/guest-components%2Fsecret-cli):
 
    ```bash
-   git clone https://github.com/confidential-containers/guest-components.git
-   cd guest-components
-   cargo run -p confidential-data-hub --bin secret --help
+   oras pull ghcr.io/confidential-containers/guest-components/secret-cli:latest
+   chmod +x secret
+   ./secret --help
    ```
 
    With the tool you can create a secret.
@@ -92,11 +94,11 @@ while envelope secrets are wrapped secrets that are unwrapped with a KMS.
    SIGNING_KID_KBS_URI=default/test_signing/jwk_public
    SIGNING_JWK_PATH=./path/to/private_public_jwk.json
    SIGNING_RESOURCE_URI=default/test_secrets/your_secret
-   
-   export POINTER_TO_SECRET=$(cargo run -p confidential-data-hub --bin secret seal \
+
+   export POINTER_TO_SECRET=$(./secret seal \
        --signing-kid kbs:///${SIGNING_KID_KBS_URI} --signing-jwk-path ${SIGNING_JWK_PATH} \
        vault \
-       --resource-uri kbs:///${SIGNING_RESOURCE_URI} --provider kbs | grep -v "Warning")
+       --resource-uri kbs:///${SIGNING_RESOURCE_URI} --provider kbs | grep -v '^Warning:')
    echo ${POINTER_TO_SECRET}
    ```
 
