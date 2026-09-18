@@ -63,8 +63,6 @@ Before starting, prepare:
 - `kubectl`, `curl`, `jq`, `openssl`, `oras`, `skopeo`, `envsubst`, `base64`, `tar`, `zstd`, and
   `cargo` installed on the node
 - Docker with the Docker Compose plugin installed on the node
-- Python packages `cryptography` and `jwcrypto` for the sealed-secret helper snippet installed on
-  the node
 
 {{% alert title="Published Artifacts" color="info" %}}
 This tutorial uses released or pre-built artifacts wherever suitable artifacts are available, so you
@@ -697,82 +695,48 @@ There are two NGC-related Secrets:
   This Secret is included in the manifest rendered below because `genpolicy` resolves
   `secretKeyRef` values from Secret objects in its YAML input.
 
-Generate a P-256 signing key for sealed secrets. The private JWK stays outside KBS; only the public
-JWK is uploaded later. CDH uses the public key resource to verify that the sealed NIM runtime secret
-came from the expected operator key before resolving the referenced plaintext secret from KBS.
+To create the sealed secret, pull a prebuilt `secret` CLI with [ORAS](https://oras.land/) from the
+[`secret-cli` GitHub package](https://github.com/confidential-containers/guest-components/pkgs/container/guest-components%2Fsecret-cli).
+Use it to generate a P-256 signing key and to create the signed vault sealed secret.
+Sealed secrets are signed to prevent tampering.
+The public component of the signing key is uploaded to Trustee.
+Inside the guest, the CDH will use this public key to validate the sealed secret.
 In production, generate and sign sealed runtime secrets in a trusted release pipeline, protect the
 private signing key, and publish only the sealed value through the approved workload release path.
 
-```bash
-KBS_WORKDIR="${KBS_WORKDIR}" python3 - <<'EOF'
-import os
-from jwcrypto import jwk
+A secret CLI binary package is available for each release. In most cases, you can use the latest version.
 
-workdir = os.environ["KBS_WORKDIR"]
-k = jwk.JWK.generate(
-    kty='EC', crv='P-256', alg='ES256',
-    use='sig', kid='sealed-secret-nim-key')
-open(f'{workdir}/signing-key-private.jwk', 'w').write(k.export_private())
-open(f'{workdir}/signing-key-public.jwk', 'w').write(k.export_public())
-EOF
+```bash
+mkdir -p "${KBS_WORKDIR}/bin"
+
+oras pull \
+  --output "${KBS_WORKDIR}/bin" \
+  ghcr.io/confidential-containers/guest-components/secret-cli:latest
+
+chmod +x "${KBS_WORKDIR}/bin/secret"
+SECRET="${KBS_WORKDIR}/bin/secret"
+
+SIGNING_KEY_KID=sealed-secret-nim-key
+"${SECRET}" keygen --kid "${SIGNING_KEY_KID}" --output-dir "${KBS_WORKDIR}"
 ```
 
-Create a signed vault sealed secret that points to the KBS-hosted NIM runtime API key. Under normal
-circumstances, use the `secret` CLI from the Confidential Containers project to create this value.
-Because this document is intended to avoid requiring readers to build CoCo components from scratch,
-and because the `secret` CLI is not published as a standalone artifact at the time of writing, the
-next snippet is a temporary compatibility helper that emits the same vault sealed-secret format. Do
-not use this helper as production secret tooling; use the supported CoCo tooling from a trusted
-release pipeline instead. A vault sealed secret is a JWS-signed JSON document containing the KBS
-resource URI and provider metadata. The protected header includes `b64` to match the format
-produced by the `secret` CLI tool.
+This writes `${KBS_WORKDIR}/sealed-secret-nim-key-private.json` for signing and
+`${KBS_WORKDIR}/sealed-secret-nim-key-public.json` for later upload to KBS.
+
+Create a signed vault sealed secret that points to the KBS-hosted NIM runtime API key. A vault
+sealed secret is a JWS-signed JSON document containing the KBS resource URI and provider metadata.
+The `--signing-kid` value is the Trustee resource URI the guest will use to fetch the public
+component of the signing key.
 
 ```bash
-KBS_WORKDIR="${KBS_WORKDIR}" python3 - <<'EOF'
-import base64
-import json
-import os
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ec, utils
-
-workdir = os.environ["KBS_WORKDIR"]
-signing_jwk = json.loads(open(f"{workdir}/signing-key-private.jwk").read())
-
-def b64url_decode(value):
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-
-def b64url_encode(value):
-    return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
-
-payload = {
-    "version": "0.1.0",
-    "type": "vault",
-    "name": "kbs:///default/ngc-api-key/instruct",
-    "provider": "kbs",
-    "provider_settings": {},
-    "annotations": {},
-}
-
-protected = {
-    "b64": True,
-    "alg": "ES256",
-    "kid": "kbs:///default/signing-key/sealed-secret",
-}
-
-private_value = int.from_bytes(b64url_decode(signing_jwk["d"]), "big")
-private_key = ec.derive_private_key(private_value, ec.SECP256R1())
-
-protected_b64 = b64url_encode(json.dumps(
-    protected, separators=(",", ":")).encode())
-payload_b64 = b64url_encode(json.dumps(payload, separators=(",", ":")).encode())
-signing_input = f"{protected_b64}.{payload_b64}".encode()
-signature_der = private_key.sign(signing_input, ec.ECDSA(hashes.SHA256()))
-r, s = utils.decode_dss_signature(signature_der)
-signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
-
-with open(f"{workdir}/ngc-api-key-instruct.sealed", "w") as f:
-    f.write(f"sealed.{protected_b64}.{payload_b64}.{b64url_encode(signature)}")
-EOF
+"${SECRET}" seal \
+  --signing-kid kbs:///default/signing-key/sealed-secret \
+  --signing-jwk-path "${KBS_WORKDIR}/${SIGNING_KEY_KID}-private.json" \
+  vault \
+  --resource-uri kbs:///default/ngc-api-key/instruct \
+  --provider kbs \
+  | grep -v '^Warning:' \
+  > "${KBS_WORKDIR}/ngc-api-key-instruct.sealed"
 ```
 
 Render the Pod manifest:
@@ -1529,7 +1493,7 @@ referenced plaintext secret from KBS.
   --admin-token-file "${KBS_ADMIN_TOKEN_FILE}" \
   set-resource \
   --path default/signing-key/sealed-secret \
-  --resource-file "${KBS_WORKDIR}/signing-key-public.jwk"
+  --resource-file "${KBS_WORKDIR}/${SIGNING_KEY_KID}-public.json"
 ```
 
 Seed the SNP reference values used by the default Trustee sample policy:
@@ -1875,9 +1839,10 @@ Useful KBS log markers:
   attestation to fail even when the KBS resources and SNP reference values are correct.
 - If image-related resources such as `credentials/nvcr`, `security-policy/nim`, and
   `cosign-public-key/nim` return HTTP 200 but KBS never sees the `signing-key/sealed-secret` or
-  `ngc-api-key/instruct` fetches, the container may still receive the sealed `NGC_API_KEY` value.
-  Regenerate the sealed secret and `genpolicy` output, and check that the sealed-secret file has no
-  trailing newline and uses the protected header format shown in checkpoint 3.
+  `ngc-api-key/instruct` fetches, attestation is working generally, but the sealed secret is likely
+  malformed. In this case, the workload may see a secret that is still sealed. Recreate
+  `ngc-api-key-instruct.sealed` with the `secret` CLI from checkpoint 3, regenerate the
+  `genpolicy` output, and confirm the sealed file is a single `sealed.` line with no trailing newline.
 
 Some warnings are not fatal in this showcase. For example, the default attestation policies can
 warn about optional reference values such as `snp_smt_enabled` or `allowed_vbios_versions`. The
